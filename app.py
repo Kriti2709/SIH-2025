@@ -1,50 +1,64 @@
+import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from pymongo import MongoClient
+from supabase import create_client, Client
 from datetime import datetime
 
-MONGODB_CONN = "mongodb+srv://testuser:testpass@your-cluster.mongodb.net/iotdata?retryWrites=true&w=majority"
+# Supabase configuration
+SUPABASE_URL = os.environ.get('SUPABASE_URL')
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 
-client = MongoClient(MONGODB_CONN)
-db = client["iotdata"]
-coll = db["readings"]
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 app = Flask(__name__)
 CORS(app)
 
-# Endpoint for devices (or test script) to POST data
-
+def detect_fault(voltage, current, accel):
+    prob = 0
+    if voltage < 210:
+        prob += 0.4
+    if current < 7:
+        prob += 0.3
+    if accel > 1.0:
+        prob += 0.3
+    if prob > 1:
+        prob = 1
+    return prob > 0.5, round(prob, 2)
 
 @app.route('/api/sensor', methods=['POST'])
 def post_sensor():
     data = request.json
-    data['timestamp'] = datetime.utcnow().isoformat()
-    # Basic fault detection! (move to server-side processing)
-    prob = 0
-    if data['voltage'] < 210:
-        prob += 0.4
-    if data['current'] < 7:
-        prob += 0.3
-    if data['accel'] > 1.0:
-        prob += 0.3
-    if prob > 1:
-        prob = 1
-    data['fault_probability'] = round(prob, 2)
-    data['status'] = "FAULT_DETECTED" if prob > 0.5 else "NORMAL"
-    coll.insert_one(data)
-    return {"ok": True}, 201
-
-# Endpoint for dashboard frontend
-
+    voltage = float(data['voltage'])
+    current = float(data['current'])
+    accel = float(data['accel'])
+    
+    fault, fault_prob = detect_fault(voltage, current, accel)
+    status = "FAULT_DETECTED" if fault else "NORMAL"
+    
+    # Insert into Supabase
+    result = supabase.table('sensor_readings').insert({
+        'voltage': voltage,
+        'current': current,
+        'accel': accel,
+        'fault': fault,
+        'fault_prob': fault_prob,
+        'status': status
+    }).execute()
+    
+    return {"ok": True, "fault": fault}, 201
 
 @app.route('/api/data')
 def get_data():
-    readings = list(coll.find().sort("timestamp", -1).limit(20))
-    # .find() returns ObjectId, convert to string or remove
-    for r in readings:
-        r.pop('_id', None)
-    return jsonify(readings[::-1])
+    result = supabase.table('sensor_readings').select("*").order('id', desc=True).limit(20).execute()
+    data = result.data[::-1]  # Reverse to show oldest first
+    return jsonify(data)
 
+@app.route('/api/status')
+def get_status():
+    result = supabase.table('sensor_readings').select("fault,fault_prob").order('id', desc=True).limit(1).execute()
+    if result.data:
+        return jsonify({'fault': result.data[0]['fault'], 'fault_prob': result.data[0]['fault_prob']})
+    return jsonify({'fault': False, 'fault_prob': 0.0})
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0")
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
