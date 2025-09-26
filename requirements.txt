@@ -1,4 +1,6 @@
 flask
 flask-cors
-pymongo
+supabase
+python-dotenv
 gunicorn
+
